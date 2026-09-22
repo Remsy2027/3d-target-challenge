@@ -1,13 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, CircleHelp, Copy, Crown, LoaderCircle, LogOut, Radio, RotateCcw, Swords, Target, Trophy, Users, WifiOff, Zap } from "lucide-react";
+import { Check, CircleHelp, Copy, Crown, LoaderCircle, LogOut, Radio, RotateCcw, Swords, Target, Trophy, Users, WifiOff, Zap, Volume2, VolumeX } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { TargetArena } from "@/components/target-arena";
-import type { GameRound, Player, Room, RoomSnapshot, RoundPlayer, RoundTarget } from "@/lib/game-types";
+import type { GameRound, Player, Room, RoomSnapshot, RoundPlayer, RoundTarget, ClientStats } from "@/lib/game-types";
+import { getMultiplier } from "@/lib/game-types";
 import { ensureAnonymousSession, isSupabaseConfigured, supabase } from "@/lib/supabase";
+import { play, playHitSound, playBonusHitSound, playMissSound, playCountdownBeep, playGoSound, playComboSound, playRoundEndSound, isMuted, toggleMute } from "@/lib/sounds";
 
 const STORAGE_KEY = "target-challenge-player";
 
@@ -43,11 +45,17 @@ function StatusPill({ connected }: { connected: boolean }) {
   );
 }
 
-function Shell({ children, connected = true }: { children: React.ReactNode; connected?: boolean }) {
+function Shell({ children, connected = true, headerChildren }: { children: React.ReactNode; connected?: boolean; headerChildren?: React.ReactNode }) {
   return (
     <main className="min-h-dvh bg-[#050b14] text-slate-100">
       <div className="mx-auto flex min-h-dvh w-full max-w-[1440px] flex-col px-4 py-4 sm:px-6 lg:px-8">
-        <header className="flex items-center justify-between py-2"><Brand /><StatusPill connected={connected} /></header>
+        <header className="flex flex-wrap items-center justify-between py-2 gap-3">
+          <Brand />
+          <div className="flex items-center gap-3">
+            {headerChildren}
+            <StatusPill connected={connected} />
+          </div>
+        </header>
         <div className="flex flex-1 items-center justify-center py-5 sm:py-8">{children}</div>
       </div>
     </main>
@@ -61,7 +69,7 @@ function LoadingScreen() {
 function SetupRequired() {
   return (
     <Shell connected={false}>
-      <Card className="glass-card w-full max-w-xl">
+      <Card className="glass-card w-full max-w-xl animate-fade-up">
         <CardHeader>
           <CardTitle className="text-2xl text-white">Connect the realtime backend</CardTitle>
           <CardDescription className="text-slate-400">The game is ready, but it needs your Supabase project values before rooms can be created.</CardDescription>
@@ -80,7 +88,7 @@ function HomeScreen({ initialCode, busy, error, onCreate, onJoin }: { initialCod
   const [code, setCode] = useState(initialCode);
   return (
     <Shell>
-      <div className="grid w-full max-w-5xl gap-6 lg:grid-cols-[1.08fr_.92fr]">
+      <div className="grid w-full max-w-5xl gap-6 lg:grid-cols-[1.08fr_.92fr] animate-fade-up">
         <section className="flex flex-col justify-center rounded-[2rem] border border-cyan-300/10 bg-[radial-gradient(circle_at_15%_20%,rgba(34,211,238,.14),transparent_34%),radial-gradient(circle_at_90%_80%,rgba(255,104,79,.14),transparent_34%)] p-6 sm:p-10">
           <div className="mb-7 inline-flex w-fit items-center gap-2 rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1.5 text-xs font-bold uppercase tracking-[0.16em] text-cyan-200"><Swords className="size-3.5" /> 2–8 players</div>
           <h1 className="max-w-xl text-4xl font-black leading-[.98] tracking-[-0.055em] text-white sm:text-6xl">Aim fast.<br /><span className="text-[#ff765e]">Climb the board.</span></h1>
@@ -134,7 +142,7 @@ function LobbyScreen({ room, players, currentPlayerId, busy, error, connected, o
   const copyRoom = async () => navigator.clipboard.writeText(`${window.location.origin}?room=${room.code}`);
   return (
     <Shell connected={connected}>
-      <div className="grid w-full max-w-5xl gap-6 lg:grid-cols-[1fr_.72fr]">
+      <div className="grid w-full max-w-5xl gap-6 lg:grid-cols-[1fr_.72fr] animate-fade-up">
         <Card className="glass-card">
           <CardHeader className="border-b border-white/[0.08]">
             <div className="flex flex-wrap items-start justify-between gap-4">
@@ -168,10 +176,22 @@ function LobbyScreen({ room, players, currentPlayerId, busy, error, connected, o
   );
 }
 
-function GameScreen({ snapshot, currentPlayerId, clockOffset, connected, onHit, onFinish }: { snapshot: RoomSnapshot; currentPlayerId: string; clockOffset: number; connected: boolean; onHit: (target: RoundTarget) => Promise<void>; onFinish: () => Promise<void> }) {
+function GameScreen({ snapshot, currentPlayerId, clockOffset, connected, clientStats, setClientStats, onHit, onFinish }: { snapshot: RoomSnapshot; currentPlayerId: string; clockOffset: number; connected: boolean; clientStats: ClientStats; setClientStats: React.Dispatch<React.SetStateAction<ClientStats>>; onHit: (target: RoundTarget, worldPos?: { x: number; y: number; z: number }) => Promise<void>; onFinish: () => Promise<void> }) {
   const round = snapshot.round!;
   const [now, setNow] = useState(Date.now() + clockOffset);
   const [hitIndexes, setHitIndexes] = useState(() => new Set(snapshot.hitTargetIndexes));
+  const [muted, setMuted] = useState(isMuted());
+  const [floatingTexts, setFloatingTexts] = useState<Array<{ id: number; points: number; type: 'normal' | 'bonus'; x: number; y: number; text: string }>>([]);
+  const [hitFlash, setHitFlash] = useState<'normal' | 'bonus' | null>(null);
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth < 1024);
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
+
   const finalizing = useRef(false);
   useEffect(() => setHitIndexes(new Set(snapshot.hitTargetIndexes)), [snapshot.hitTargetIndexes]);
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now() + clockOffset), 50); return () => window.clearInterval(timer); }, [clockOffset]);
@@ -181,24 +201,138 @@ function GameScreen({ snapshot, currentPlayerId, clockOffset, connected, onHit, 
   const remaining = Math.max(0, Math.ceil((endMs - now) / 1000));
   const activeTarget = snapshot.targets.find((target) => now >= new Date(target.starts_at).getTime() && now <= new Date(target.ends_at).getTime() && !hitIndexes.has(target.target_index)) ?? null;
   const isParticipant = snapshot.roundPlayers.some((score) => score.player_id === currentPlayerId);
+  
   useEffect(() => { if (now >= endMs && !finalizing.current) { finalizing.current = true; void onFinish(); } }, [endMs, now, onFinish]);
-  const hit = async (target: RoundTarget) => {
+
+  const prevSeconds = useRef(secondsToStart);
+  useEffect(() => {
+    if (prevSeconds.current !== secondsToStart) {
+      if (secondsToStart > 0 && secondsToStart <= 3) {
+        play(() => playCountdownBeep(secondsToStart));
+      } else if (secondsToStart === 0 && prevSeconds.current > 0) {
+        play(playGoSound);
+      }
+      prevSeconds.current = secondsToStart;
+    }
+  }, [secondsToStart]);
+
+  const prevRemaining = useRef(remaining);
+  useEffect(() => {
+    if (prevRemaining.current !== remaining) {
+      if (remaining === 0 && prevRemaining.current > 0) {
+        play(playRoundEndSound);
+      }
+      prevRemaining.current = remaining;
+    }
+  }, [remaining]);
+
+  const activeTargetIndex = activeTarget?.target_index ?? -1;
+  const lastTargetIndexRef = useRef(activeTargetIndex);
+  useEffect(() => {
+    if (lastTargetIndexRef.current !== -1 && lastTargetIndexRef.current !== activeTargetIndex && isParticipant) {
+      if (!hitIndexes.has(lastTargetIndexRef.current)) {
+        setClientStats((s) => ({ ...s, streak: 0, misses: s.misses + 1, multiplier: 1 }));
+        play(playMissSound);
+      }
+    }
+    lastTargetIndexRef.current = activeTargetIndex;
+  }, [activeTargetIndex, hitIndexes, isParticipant, setClientStats]);
+
+  const hit = async (target: RoundTarget, worldPos?: { x: number; y: number; z: number }) => {
     if (now < startMs || now >= endMs || hitIndexes.has(target.target_index)) return;
     setHitIndexes((current) => new Set(current).add(target.target_index));
-    await onHit(target);
+    
+    let newStreak = 0;
+    let newMultiplier = 1;
+    setClientStats(s => {
+      newStreak = s.streak + 1;
+      newMultiplier = getMultiplier(newStreak);
+      const newBest = Math.max(s.bestStreak, newStreak);
+      return { ...s, streak: newStreak, bestStreak: newBest, hits: s.hits + 1, multiplier: newMultiplier };
+    });
+
+    if (target.target_type === 'bonus') play(playBonusHitSound);
+    else play(playHitSound);
+
+    if (newStreak === 3 || newStreak === 5 || newStreak === 10) {
+      play(() => playComboSound(newStreak));
+    }
+
+    setHitFlash(target.target_type);
+    setTimeout(() => setHitFlash(null), 200);
+
+    const id = Date.now();
+    const x = 40 + Math.random() * 20;
+    const y = 40 + Math.random() * 20;
+    const multText = newMultiplier > 1 ? ` x${newMultiplier}` : '';
+    const text = target.target_type === 'bonus' ? `+25 BONUS${multText}` : `+10${multText}`;
+
+    setFloatingTexts(current => [...current, { id, points: target.points, type: target.target_type, x, y, text }]);
+    setTimeout(() => {
+      setFloatingTexts(current => current.filter(t => t.id !== id));
+    }, 800);
+
+    await onHit(target, worldPos);
   };
+  
   const myScore = snapshot.roundPlayers.find((score) => score.player_id === currentPlayerId)?.score ?? 0;
+  
+  const getComboClass = (streak: number) => {
+    if (streak >= 10) return "combo-10";
+    if (streak >= 5) return "combo-5";
+    return "combo-3";
+  };
+
   return (
     <main className="min-h-dvh bg-[#050b14] p-3 text-slate-100 sm:p-4">
       <div className="mx-auto grid min-h-[calc(100dvh-1.5rem)] max-w-[1480px] grid-rows-[auto_1fr] gap-3 sm:min-h-[calc(100dvh-2rem)]">
         <header className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/[0.08] bg-[#0b1524]/95 px-4 py-3">
           <Brand />
-          <div className="flex items-center gap-2 sm:gap-3"><div className="score-chip"><span>Score</span><strong>{myScore}</strong></div><div className={`timer-chip ${remaining <= 10 ? "timer-danger" : ""}`}><span>{secondsToStart > 0 ? "Starts in" : "Time"}</span><strong>{secondsToStart > 0 ? secondsToStart : remaining}</strong></div><StatusPill connected={connected} /></div>
+          <div className="flex items-center gap-2 sm:gap-3">
+            <button onClick={() => { toggleMute(); setMuted(isMuted()); }} className="mute-btn" title="Toggle Sound">
+              {muted ? <VolumeX className="size-4" /> : <Volume2 className="size-4" />}
+            </button>
+            {!isMobile && (
+              <>
+                <div className="score-chip"><span>Score</span><strong>{myScore}</strong></div>
+                {clientStats.streak >= 3 && (
+                  <div className={`combo-badge ${getComboClass(clientStats.streak)}`}>
+                    🔥 x{clientStats.multiplier}
+                  </div>
+                )}
+                <div className={`timer-chip ${remaining <= 10 ? "timer-danger" : ""}`}><span>{secondsToStart > 0 ? "Starts in" : "Time"}</span><strong>{secondsToStart > 0 ? secondsToStart : remaining}</strong></div>
+              </>
+            )}
+            <StatusPill connected={connected} />
+          </div>
         </header>
         <div className="grid min-h-0 gap-3 lg:grid-cols-[minmax(0,1fr)_300px]">
           <section className="relative min-h-[420px] overflow-hidden rounded-[1.5rem] border border-white/[0.08] bg-[#07111f]">
+            {hitFlash && <div className={`hit-flash hit-flash-${hitFlash}`} />}
+            
+            {floatingTexts.map(t => (
+              <div key={t.id} className={`float-score float-score-${t.type}`} style={{ left: `${t.x}%`, top: `${t.y}%` }}>
+                {t.text}
+              </div>
+            ))}
+
+            {isMobile && (
+              <div className="arena-hud flex justify-between p-3">
+                <div className="score-chip bg-black/50 backdrop-blur"><span>Score</span><strong>{myScore}</strong></div>
+                {clientStats.streak >= 3 && (
+                  <div className={`combo-badge ${getComboClass(clientStats.streak)}`}>
+                    🔥 x{clientStats.multiplier}
+                  </div>
+                )}
+                <div className={`timer-chip bg-black/50 backdrop-blur ${remaining <= 10 ? "timer-danger" : ""}`}>
+                  <span>{secondsToStart > 0 ? "Starts in" : "Time"}</span><strong>{secondsToStart > 0 ? secondsToStart : remaining}</strong>
+                </div>
+              </div>
+            )}
+
             <TargetArena target={secondsToStart === 0 && isParticipant ? activeTarget : null} onHit={hit} disabled={remaining === 0 || !isParticipant} />
-            <div className="pointer-events-none absolute inset-x-0 top-5 flex justify-center">
+            
+            <div className="pointer-events-none absolute inset-x-0 top-5 flex justify-center z-20">
               {!isParticipant ? <div className="rounded-full border border-white/10 bg-black/45 px-4 py-2 text-sm font-bold text-slate-200 backdrop-blur">Spectating this round</div> : secondsToStart > 0 ? <div className="countdown-bubble"><span>Get ready</span><strong>{secondsToStart}</strong></div> : !activeTarget && remaining > 0 ? <div className="rounded-full border border-white/10 bg-black/35 px-4 py-2 text-sm font-bold text-slate-300 backdrop-blur">Next target…</div> : activeTarget?.target_type === "bonus" ? <div className="rounded-full border border-amber-300/30 bg-amber-300/15 px-4 py-2 text-sm font-black text-amber-200 backdrop-blur">BONUS · 25 POINTS</div> : null}
             </div>
           </section>
@@ -213,15 +347,32 @@ function GameScreen({ snapshot, currentPlayerId, clockOffset, connected, onHit, 
   );
 }
 
-function ResultsScreen({ snapshot, currentPlayerId, connected, busy, error, onLobby, onLeave }: { snapshot: RoomSnapshot; currentPlayerId: string; connected: boolean; busy: boolean; error: string; onLobby: () => Promise<void>; onLeave: () => void }) {
+function ResultsScreen({ snapshot, currentPlayerId, connected, busy, error, clientStats, onLobby, onLeave }: { snapshot: RoomSnapshot; currentPlayerId: string; connected: boolean; busy: boolean; error: string; clientStats: ClientStats; onLobby: () => Promise<void>; onLeave: () => void }) {
   const scoreMap = new Map(snapshot.roundPlayers.map((score) => [score.player_id, score.score]));
   const ranked = snapshot.players.filter((player) => scoreMap.has(player.id)).sort((a, b) => (scoreMap.get(b.id) ?? 0) - (scoreMap.get(a.id) ?? 0));
   const topScore = ranked.length ? scoreMap.get(ranked[0].id) ?? 0 : 0;
   const winners = ranked.filter((player) => (scoreMap.get(player.id) ?? 0) === topScore);
   const isHost = snapshot.room.host_player_id === currentPlayerId;
+
+  const [pb, setPb] = useState<number>(0);
+  useEffect(() => {
+    const storedPb = parseInt(window.localStorage.getItem('target-challenge-pb') || '0', 10);
+    const myScore = snapshot.roundPlayers.find(s => s.player_id === currentPlayerId)?.score ?? 0;
+    if (myScore > storedPb) {
+      window.localStorage.setItem('target-challenge-pb', myScore.toString());
+      setPb(myScore);
+    } else {
+      setPb(storedPb);
+    }
+  }, [snapshot.roundPlayers, currentPlayerId]);
+
+  const { hits, misses } = clientStats;
+  const total = hits + misses;
+  const accuracy = total > 0 ? Math.round((hits / total) * 100) : 0;
+
   return (
     <Shell connected={connected}>
-      <Card className="glass-card w-full max-w-2xl overflow-hidden">
+      <Card className="glass-card w-full max-w-2xl overflow-hidden animate-fade-up">
         <div className="border-b border-white/[0.08] bg-[radial-gradient(circle_at_50%_0%,rgba(251,191,36,.18),transparent_62%)] px-6 py-8 text-center">
           <div className="mx-auto mb-4 grid size-16 place-items-center rounded-2xl bg-amber-300 text-amber-950 shadow-[0_10px_45px_rgba(251,191,36,.25)]"><Trophy className="size-8" /></div>
           <p className="text-xs font-black uppercase tracking-[0.2em] text-amber-300">Round complete</p>
@@ -229,6 +380,13 @@ function ResultsScreen({ snapshot, currentPlayerId, connected, busy, error, onLo
           <p className="mt-2 text-slate-400">Top score: {topScore} points</p>
         </div>
         <CardContent className="space-y-5 pt-6">
+          <div className="mb-4 flex flex-col items-center justify-center gap-1 rounded-xl bg-black/20 p-4 border border-white/5">
+            <div className="text-sm font-bold text-slate-400">Accuracy</div>
+            <div className="text-3xl font-black text-white">{accuracy}%</div>
+            <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mt-1">{hits} hits · {misses} misses</div>
+            {pb > 0 && <div className="mt-3 text-xs font-black uppercase tracking-widest text-amber-300 bg-amber-400/10 px-3 py-1.5 rounded-full">Personal Best: {pb}</div>}
+          </div>
+          
           <Leaderboard players={snapshot.players} scores={snapshot.roundPlayers} currentPlayerId={currentPlayerId} />
           {isHost ? <Button className="game-button h-12 w-full" disabled={busy} onClick={onLobby}><RotateCcw /> Play another round</Button> : <div className="grid h-12 place-items-center rounded-xl border border-white/10 bg-white/[0.035] text-sm text-slate-400">Waiting for the host to open the lobby</div>}
           {error && <p role="alert" className="rounded-xl border border-red-400/20 bg-red-400/10 p-3 text-sm text-red-200">{error}</p>}
@@ -247,8 +405,17 @@ export function GameClient() {
   const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
   const [connected, setConnected] = useState(true);
   const [clockOffset, setClockOffset] = useState(0);
+  
+  const [clientStats, setClientStats] = useState<ClientStats>({ streak: 0, bestStreak: 0, hits: 0, misses: 0, multiplier: 1 });
+  
   const snapshotRef = useRef<RoomSnapshot | null>(null);
   snapshotRef.current = snapshot;
+
+  useEffect(() => {
+    if (snapshot?.room.status === "lobby") {
+      setClientStats({ streak: 0, bestStreak: 0, hits: 0, misses: 0, multiplier: 1 });
+    }
+  }, [snapshot?.room.status]);
 
   const loadSnapshot = useCallback(async (roomId: string, activePlayerId: string) => {
     if (!supabase) return;
@@ -347,7 +514,7 @@ export function GameClient() {
     finally { setBusy(false); }
   };
 
-  const hitTarget = useCallback(async (target: RoundTarget) => {
+  const hitTarget = useCallback(async (target: RoundTarget, worldPos?: { x: number; y: number; z: number }) => {
     if (!supabase || !playerId || !snapshotRef.current?.round) return;
     const { error: hitError } = await supabase.rpc("submit_hit", { p_player_id: playerId, p_round_id: snapshotRef.current.round.id, p_target_index: target.target_index });
     if (hitError) setError(hitError.message);
@@ -369,6 +536,6 @@ export function GameClient() {
     return <HomeScreen initialCode={initialCode} busy={busy} error={error} onCreate={(name) => enterRoom("create_room", { p_display_name: name.trim() })} onJoin={(name, code) => enterRoom("join_room", { p_display_name: name.trim(), p_code: code.trim().toUpperCase() })} />;
   }
   if (snapshot.room.status === "lobby") return <LobbyScreen room={snapshot.room} players={snapshot.players} currentPlayerId={playerId} busy={busy} error={error} connected={connected} onReady={(ready) => perform("set_ready", { p_ready: ready })} onStart={() => perform("start_round")} onLeave={leave} />;
-  if (snapshot.room.status === "active" && snapshot.round) return <GameScreen snapshot={snapshot} currentPlayerId={playerId} clockOffset={clockOffset} connected={connected} onHit={hitTarget} onFinish={finishRound} />;
-  return <ResultsScreen snapshot={snapshot} currentPlayerId={playerId} connected={connected} busy={busy} error={error} onLobby={() => perform("return_to_lobby")} onLeave={leave} />;
+  if (snapshot.room.status === "active" && snapshot.round) return <GameScreen snapshot={snapshot} currentPlayerId={playerId} clockOffset={clockOffset} connected={connected} clientStats={clientStats} setClientStats={setClientStats} onHit={hitTarget} onFinish={finishRound} />;
+  return <ResultsScreen snapshot={snapshot} currentPlayerId={playerId} connected={connected} busy={busy} error={error} clientStats={clientStats} onLobby={() => perform("return_to_lobby")} onLeave={leave} />;
 }

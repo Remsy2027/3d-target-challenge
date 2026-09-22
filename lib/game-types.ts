@@ -53,3 +53,19 @@ export interface RoomSnapshot {
   targets: RoundTarget[];
   hitTargetIndexes: number[];
 }
+
+/** Client-side combo/accuracy tracking (not persisted to DB) */
+export interface ClientStats {
+  streak: number;
+  bestStreak: number;
+  hits: number;
+  misses: number;
+  multiplier: number;
+}
+
+export function getMultiplier(streak: number): number {
+  if (streak >= 10) return 3;
+  if (streak >= 5) return 2;
+  if (streak >= 3) return 1.5;
+  return 1;
+}
