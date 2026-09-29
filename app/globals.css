@@ -83,7 +83,7 @@
 
 * { box-sizing: border-box; }
 html { background: #050b14; overscroll-behavior: none; }
-body { margin: 0; background: var(--background); color: var(--foreground); font-family: var(--font-sans); overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+body { margin: 0; background: var(--background); color: var(--foreground); font-family: var(--font-sans); overscroll-behavior: none; -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%; }
 button, input { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; }
@@ -94,20 +94,22 @@ button:disabled { cursor: not-allowed; }
 .game-button { background: linear-gradient(135deg, #ff795f, #fb543d); color: white; box-shadow: 0 10px 30px rgb(251 84 61 / 0.2); }
 .game-button:hover { background: linear-gradient(135deg, #ff8a72, #ff624c); }
 .rule-number { display: grid; width: 1.75rem; height: 1.75rem; flex: 0 0 auto; place-items: center; border: 1px solid rgb(34 211 238 / 0.24); border-radius: 0.6rem; background: rgb(34 211 238 / 0.1); color: #a5f3fc; font-size: 0.75rem; font-weight: 900; }
-.score-chip, .timer-chip { display: flex; min-width: 84px; align-items: center; justify-content: space-between; gap: 0.75rem; border: 1px solid rgb(255 255 255 / 0.1); border-radius: 0.85rem; background: rgb(255 255 255 / 0.055); padding: 0.45rem 0.7rem; }
-.score-chip span, .timer-chip span { color: #94a3b8; font-size: 0.7rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em; }
-.score-chip strong, .timer-chip strong { color: #cffafe; font-family: var(--font-mono); font-size: 1.25rem; }
+.score-chip, .timer-chip { display: flex; min-width: 76px; align-items: center; justify-content: space-between; gap: 0.55rem; border: 1px solid rgb(255 255 255 / 0.1); border-radius: 0.85rem; background: rgb(255 255 255 / 0.055); padding: 0.4rem 0.62rem; }
+.score-chip span, .timer-chip span { color: #94a3b8; font-size: 0.66rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em; }
+.score-chip strong, .timer-chip strong { color: #cffafe; font-family: var(--font-mono); font-size: 1.1rem; line-height: 1.1; }
 .timer-chip strong { color: white; }
+@media (min-width: 1024px) { .score-chip strong, .timer-chip strong { font-size: 1.25rem; } }
 .timer-danger { border-color: rgb(248 113 113 / 0.35); background: rgb(248 113 113 / 0.12); }
 .timer-danger strong { color: #fca5a5; }
 .countdown-bubble { display: flex; align-items: center; gap: 0.75rem; border: 1px solid rgb(255 255 255 / 0.15); border-radius: 999px; background: rgb(0 0 0 / 0.48); padding: 0.5rem 0.75rem 0.5rem 1rem; color: #cbd5e1; font-size: 0.85rem; font-weight: 800; backdrop-filter: blur(12px); }
 .countdown-bubble strong { display: grid; width: 2rem; height: 2rem; place-items: center; border-radius: 999px; background: #ff684f; color: white; font-family: var(--font-mono); font-size: 1.1rem; }
 
-@media (max-width: 640px) {
-  .score-chip { min-width: 70px; }
-  .score-chip span { display: none; }
-  .timer-chip { min-width: 76px; }
-  header .text-lg { font-size: 0.95rem; }
+@media (max-width: 639px) {
+  .score-chip, .timer-chip { min-width: 0; border-radius: 0.75rem; }
+  .float-score { font-size: 1.15rem; }
+  .float-score-bonus { font-size: 1.3rem; }
+  .countdown-bubble { font-size: 0.78rem; }
+  .combo-badge { font-size: 0.72rem; padding: 0.25rem 0.55rem; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
@@ -185,15 +187,6 @@ button:disabled { cursor: not-allowed; }
 .hit-flash-normal { background: radial-gradient(circle, rgb(255 104 79 / 0.3), transparent 70%); }
 .hit-flash-bonus { background: radial-gradient(circle, rgb(251 191 36 / 0.35), transparent 70%); }
 
-/* Mobile overlay HUD on canvas */
-.arena-hud {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  z-index: 10;
-}
-.arena-hud > * { pointer-events: auto; }
-
 /* Accuracy ring on results */
 @keyframes accuracy-fill {
   from { stroke-dashoffset: 282.74; }
@@ -203,8 +196,9 @@ button:disabled { cursor: not-allowed; }
 /* Mute button */
 .mute-btn {
   display: grid;
-  width: 2.25rem;
-  height: 2.25rem;
+  width: 2.5rem;
+  height: 2.5rem;
+  flex: 0 0 auto;
   place-items: center;
   border: 1px solid rgb(255 255 255 / 0.1);
   border-radius: 0.75rem;

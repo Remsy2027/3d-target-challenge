@@ -13,10 +13,23 @@ A realtime multiplayer browser game for 2–8 players. React renders the interfa
 1. Create a Supabase project.
 2. Open **Authentication → Providers → Anonymous Sign-Ins** and enable anonymous sign-ins.
 3. Open **SQL Editor**.
-4. Copy the full contents of `supabase/migrations/202609220001_core_game.sql` into a new query and run it once.
+4. Run each migration **in numeric order** as a new query in the SQL Editor: `202609220001_core_game.sql`, then `202609220002_progressive_difficulty.sql`, `202609220003_game_modes_targets_powerups.sql`, then `202609220004_powerups_server_side.sql`. Migration 4 makes scoring fully server-authoritative (streak multipliers, double points, shield, time freeze) and fixes survival mode's target-count limit.
 5. Open **Project Settings → API** and copy the project URL and anon/public key.
 
 The migration creates the tables, Row-Level Security policies, secure game functions, hit validation, and realtime publications.
+
+### Applying the missing migrations
+
+If the game says **`Could not find the function public.start_round(p_game_mode, p_player_id) in the schema cache`** when the host presses **Start game**, the project has migrations 1 and 2 but not 3 and 4. Instead of pasting both files, paste `supabase/apply-missing-migrations.sql`, which contains just those two in order plus a read-only verification query whose every row should return `OK`. The app also detects this itself and shows a setup card naming the files still to run.
+
+You can confirm the state of any project from the terminal without credentials:
+
+```bash
+curl "$NEXT_PUBLIC_SUPABASE_URL/rest/v1/rooms?select=game_mode&limit=1" \
+  -H "apikey: $NEXT_PUBLIC_SUPABASE_ANON_KEY" -H "Authorization: Bearer $NEXT_PUBLIC_SUPABASE_ANON_KEY"
+```
+
+A `42703 column rooms.game_mode does not exist` response means migration 3 has not run yet.
 
 ## 2. Configure the app
 
@@ -86,7 +99,7 @@ Test the complete loop:
 ## Security model
 
 - The browser never writes scores directly.
-- `submit_hit` checks the authenticated player, active round, target timing, target value, and duplicate hits.
+- `submit_hit` is the single source of truth for scoring: it validates the authenticated player, active round, target timing, and duplicate hits, and computes streak multipliers, double points, shield, time freeze, and the decoy penalty server-side. The client only mirrors the server's response for instant UI feedback.
 - A unique database key makes repeat submissions idempotent.
 - The official leaderboard uses server-confirmed scores only.
 - Target positions and animation stay local; only room, readiness, round, hit, and score data are synchronized.
@@ -97,3 +110,11 @@ Test the complete loop:
 pnpm exec tsc --noEmit
 pnpm build
 ```
+
+## Troubleshooting
+
+- **`Could not find the function public.start_round(...) in the schema cache`** — migrations 3 and 4 have not been applied. See *Applying the missing migrations* above.
+- **`function public.start_round(uuid, text) does not exist` while running migration 4** — you ran migration 4 without migration 3, so the two-argument `start_round` does not exist yet. The SQL Editor runs a script in a single transaction, so this failure rolls back *everything* in that script and the database stays unchanged. Run 3 first (or paste `supabase/apply-missing-migrations.sql` whole). Migration 4 now detects this and refuses with a readable message.
+- **Nothing seems to change after running the SQL** — check the project ref in the dashboard URL matches `NEXT_PUBLIC_SUPABASE_URL` in `.env.local`, then run the verification query at the bottom of `supabase/apply-missing-migrations.sql`; every row must say `OK`.
+- **Every room looks empty or scores never update** — check that anonymous sign-ins are enabled (step 2) and that the realtime publication exists; migration 1 creates it.
+- **The host cannot start with one player** — by design: at least two players must be ready.

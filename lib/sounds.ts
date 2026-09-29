@@ -93,6 +93,27 @@ export function playRoundEndSound() {
   setTimeout(() => playTone(523, 0.4, "sawtooth", 0.06), 200);
 }
 
+/** Buzzer for decoy */
+export function playDecoyHitSound() {
+  playTone(150, 0.2, "sawtooth", 0.2);
+  playTone(100, 0.3, "sawtooth", 0.2);
+}
+
+/** Zap for speed target */
+export function playSpeedHitSound() {
+  playTone(1800, 0.05, "square", 0.1);
+  setTimeout(() => playTone(2200, 0.05, "square", 0.1), 30);
+  playNoise(0.05, 0.1);
+}
+
+/** Magical chime for powerups */
+export function playPowerupSound() {
+  playTone(880, 0.1, "sine", 0.1);
+  setTimeout(() => playTone(1108, 0.1, "sine", 0.1), 80);
+  setTimeout(() => playTone(1318, 0.15, "sine", 0.1), 160);
+  setTimeout(() => playTone(1760, 0.3, "sine", 0.1), 240);
+}
+
 /** Mute state — stored in memory, toggled by user */
 let muted = false;
 

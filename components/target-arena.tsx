@@ -3,7 +3,7 @@
 import { Canvas, type ThreeEvent, useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useRef, useState, useMemo } from "react";
 import * as THREE from "three";
-import type { RoundTarget } from "@/lib/game-types";
+import type { RoundTarget, ArenaTheme, TargetType } from "@/lib/game-types";
 
 export interface ExplosionState {
   id: string;
@@ -16,20 +16,21 @@ export interface ExplosionState {
 
 function CameraController() {
   const { camera, size } = useThree();
-  
+
   useEffect(() => {
-    const aspect = size.width / size.height;
+    const aspect = Math.max(size.width / size.height, 0.2);
     const distance = 8;
-    const halfWidth = 3.6; // Slightly larger for padding (playfield is [-3.3, 3.3])
-    
+    // Keep the whole playfield (x [-3.3, 3.3], y [-2.1, 2.1]) visible with a little
+    // padding on ANY canvas shape — portrait phones through ultrawide laptops — instead
+    // of leaving the target tiny inside a mostly empty frame.
+    const halfWidth = 3.7;
+    const halfHeight = 2.65;
+
     if (camera instanceof THREE.PerspectiveCamera) {
-      if (aspect < 1) {
-        // Calculate FOV required to fit width for portrait mode
-        const fovRad = 2 * Math.atan((halfWidth / aspect) / distance);
-        camera.fov = fovRad * (180 / Math.PI);
-      } else {
-        camera.fov = 48; // Default landscape FOV
-      }
+      const fovForHeight = 2 * Math.atan(halfHeight / distance);
+      const fovForWidth = 2 * Math.atan(halfWidth / aspect / distance);
+      const fovDeg = Math.max(fovForHeight, fovForWidth) * (180 / Math.PI);
+      camera.fov = Math.min(72, Math.max(34, fovDeg));
       camera.updateProjectionMatrix();
     }
   }, [camera, size]);
@@ -37,7 +38,7 @@ function CameraController() {
   return null;
 }
 
-function BackgroundAtmosphere() {
+function BackgroundAtmosphere({ theme }: { theme: ArenaTheme }) {
   const gridRef = useRef<THREE.GridHelper>(null);
   
   useFrame(({ clock }) => {
@@ -47,9 +48,17 @@ function BackgroundAtmosphere() {
     }
   });
   
+  const gridColors = {
+    cyber: ["#1e3a8a", "#0f172a"],
+    volcanic: ["#991b1b", "#450a0a"],
+    neon: ["#d946ef", "#701a75"]
+  } as const;
+
+  const [color1, color2] = gridColors[theme] || gridColors.cyber;
+  
   return (
     <group rotation={[Math.PI / 2, 0, 0]} position={[0, 0, -1.4]}>
-      <gridHelper ref={gridRef} args={[30, 30, "#1e3a8a", "#0f172a"]} />
+      <gridHelper ref={gridRef} args={[30, 30, color1, color2]} />
     </group>
   );
 }
@@ -112,11 +121,87 @@ function ExplosionParticles({ explosion }: { explosion: ExplosionState }) {
 
 function TargetMesh({ target, onHit }: { target: RoundTarget; onHit: (worldPos: { x: number; y: number; z: number }) => void }) {
   const group = useRef<THREE.Group>(null);
-  const isBonus = target.target_type === "bonus";
-  const radius = isBonus ? 0.48 : 0.68;
+  const type = target.target_type;
+  
+  let radius = 0.68;
+  let outerColor = "#fb5f4a";
+  let outerEmissive = "#7d1e18";
+  let innerColor = "#fff7ed";
+  let coreColor = "#ef4444";
+  let coreEmissive = "#7f1d1d";
+  let lightColor = "#fb5f4a";
+  let geometryType = "cylinder";
+  
+  switch (type) {
+    case "bonus":
+      radius = 0.48;
+      outerColor = "#f7c948";
+      outerEmissive = "#8a5b00";
+      innerColor = "#fff4b8";
+      coreColor = "#f59e0b";
+      coreEmissive = "#7c4a03";
+      lightColor = "#fbbf24";
+      break;
+    case "decoy":
+      outerColor = "#3f3f46";
+      outerEmissive = "#18181b";
+      innerColor = "#52525b";
+      coreColor = "#27272a";
+      coreEmissive = "#000000";
+      lightColor = "#71717a";
+      break;
+    case "speed":
+      radius = 0.4;
+      outerColor = "#3b82f6";
+      outerEmissive = "#1e3a8a";
+      innerColor = "#eff6ff";
+      coreColor = "#2563eb";
+      coreEmissive = "#1e40af";
+      lightColor = "#60a5fa";
+      break;
+    case "moving":
+      outerColor = "#22c55e";
+      outerEmissive = "#14532d";
+      innerColor = "#f0fdf4";
+      coreColor = "#16a34a";
+      coreEmissive = "#166534";
+      lightColor = "#4ade80";
+      break;
+    case "time_freeze":
+      outerColor = "#38bdf8";
+      outerEmissive = "#0c4a6e";
+      innerColor = "#f0f9ff";
+      coreColor = "#0284c7";
+      coreEmissive = "#075985";
+      lightColor = "#7dd3fc";
+      geometryType = "octahedron";
+      break;
+    case "double_points":
+      outerColor = "#a855f7";
+      outerEmissive = "#4c1d95";
+      innerColor = "#faf5ff";
+      coreColor = "#9333ea";
+      coreEmissive = "#5b21b6";
+      lightColor = "#c084fc";
+      geometryType = "dodecahedron";
+      break;
+    case "shield":
+      outerColor = "#10b981";
+      outerEmissive = "#064e3b";
+      innerColor = "#ecfdf5";
+      coreColor = "#059669";
+      coreEmissive = "#065f46";
+      lightColor = "#34d399";
+      geometryType = "hexagon";
+      break;
+    case "normal":
+    default:
+      break;
+  }
   
   const spawnTime = useRef<number>(0);
   const initialized = useRef(false);
+  const velocity = useRef(new THREE.Vector2(target.velocity_x ?? 0, target.velocity_y ?? 0));
 
   const easeOutBack = (x: number): number => {
     const c1 = 1.70158;
@@ -124,11 +209,25 @@ function TargetMesh({ target, onHit }: { target: RoundTarget; onHit: (worldPos: 
     return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2);
   };
 
-  useFrame(({ clock }) => {
+  useFrame(({ clock }, delta) => {
     if (!group.current) return;
     if (!initialized.current) {
       spawnTime.current = clock.elapsedTime;
       initialized.current = true;
+    }
+
+    // Moving target logic. Bounce off the playfield bounds so a moving target can
+    // never drift out of the visible area and become unclickable (especially on
+    // phones, where the visible frame is tighter).
+    const vx = velocity.current.x;
+    const vy = velocity.current.y;
+    if (vx || vy) {
+      let nextX = group.current.position.x + vx * delta;
+      let nextY = group.current.position.y + vy * delta;
+      if (nextX > 3.05 || nextX < -3.05) { velocity.current.x = -vx; nextX = THREE.MathUtils.clamp(nextX, -3.05, 3.05); }
+      if (nextY > 1.85 || nextY < -1.85) { velocity.current.y = -vy; nextY = THREE.MathUtils.clamp(nextY, -1.85, 1.85); }
+      group.current.position.x = nextX;
+      group.current.position.y = nextY;
     }
     
     const age = clock.elapsedTime - spawnTime.current;
@@ -142,7 +241,15 @@ function TargetMesh({ target, onHit }: { target: RoundTarget; onHit: (worldPos: 
     // Idle pulsing
     const pulse = scale + Math.sin(clock.elapsedTime * 7) * 0.045 * (age > 0.2 ? 1 : 0);
     group.current.scale.setScalar(Math.max(0, pulse));
+    
+    // Base rotation
     group.current.rotation.z = Math.sin(clock.elapsedTime * 2.5) * 0.08;
+    
+    // Dynamic spin for 3D shapes
+    if (geometryType === "octahedron" || geometryType === "dodecahedron") {
+      group.current.rotation.x += delta * 0.5;
+      group.current.rotation.y += delta * 1.5;
+    }
   });
 
   const hit = (event: ThreeEvent<PointerEvent>) => {
@@ -150,43 +257,94 @@ function TargetMesh({ target, onHit }: { target: RoundTarget; onHit: (worldPos: 
     onHit({ x: event.point.x, y: event.point.y, z: event.point.z });
   };
 
+  const renderGeometry = () => {
+    switch (geometryType) {
+      case "octahedron": return <octahedronGeometry args={[radius, 0]} />;
+      case "dodecahedron": return <dodecahedronGeometry args={[radius, 0]} />;
+      case "hexagon": return <cylinderGeometry args={[radius, radius, 0.18, 6]} />;
+      case "cylinder":
+      default: return <cylinderGeometry args={[radius, radius, 0.18, 40]} />;
+    }
+  };
+
+  const renderInnerGeometry = () => {
+    switch (geometryType) {
+      case "octahedron": return <octahedronGeometry args={[radius * 0.62, 0]} />;
+      case "dodecahedron": return <dodecahedronGeometry args={[radius * 0.62, 0]} />;
+      case "hexagon": return <cylinderGeometry args={[radius * 0.62, radius * 0.62, 0.08, 6]} />;
+      case "cylinder":
+      default: return <cylinderGeometry args={[radius * 0.62, radius * 0.62, 0.08, 40]} />;
+    }
+  };
+
+  const renderCoreGeometry = () => {
+    switch (geometryType) {
+      case "octahedron": return <octahedronGeometry args={[radius * 0.28, 0]} />;
+      case "dodecahedron": return <dodecahedronGeometry args={[radius * 0.28, 0]} />;
+      case "hexagon": return <cylinderGeometry args={[radius * 0.28, radius * 0.28, 0.07, 6]} />;
+      case "cylinder":
+      default: return <cylinderGeometry args={[radius * 0.28, radius * 0.28, 0.07, 40]} />;
+    }
+  };
+
+  const isFlat = geometryType === "cylinder" || geometryType === "hexagon";
+  const rot: [number, number, number] = isFlat ? [Math.PI / 2, 0, 0] : [0, 0, 0];
+
   return (
     <group ref={group} position={[target.pos_x, target.pos_y, target.pos_z]} onPointerDown={hit}>
-      <mesh rotation={[Math.PI / 2, 0, 0]} castShadow>
-        <cylinderGeometry args={[radius, radius, 0.18, 40]} />
-        <meshStandardMaterial color={isBonus ? "#f7c948" : "#fb5f4a"} emissive={isBonus ? "#8a5b00" : "#7d1e18"} emissiveIntensity={0.48} roughness={0.35} metalness={0.12} />
+      <mesh rotation={rot} castShadow>
+        {renderGeometry()}
+        <meshStandardMaterial color={outerColor} emissive={outerEmissive} emissiveIntensity={0.48} roughness={0.35} metalness={0.12} />
       </mesh>
       
-      <mesh position={[0, 0, 0.11]} rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[radius * 0.62, radius * 0.62, 0.08, 40]} />
-        <meshStandardMaterial color={isBonus ? "#fff4b8" : "#fff7ed"} />
+      <mesh position={[0, 0, 0.11]} rotation={rot}>
+        {renderInnerGeometry()}
+        <meshStandardMaterial color={innerColor} />
       </mesh>
       
-      <mesh position={[0, 0, 0.17]} rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[radius * 0.28, radius * 0.28, 0.07, 40]} />
-        <meshStandardMaterial color={isBonus ? "#f59e0b" : "#ef4444"} emissive={isBonus ? "#7c4a03" : "#7f1d1d"} emissiveIntensity={0.35} />
+      <mesh position={[0, 0, 0.17]} rotation={rot}>
+        {renderCoreGeometry()}
+        <meshStandardMaterial color={coreColor} emissive={coreEmissive} emissiveIntensity={0.35} />
       </mesh>
       
-      {/* Target glow elements */}
-      {isBonus ? (
-        <pointLight color="#fbbf24" intensity={7} distance={3.5} />
-      ) : (
-        <pointLight color="#fb5f4a" intensity={4} distance={2.5} />
-      )}
+      <pointLight color={lightColor} intensity={type === "bonus" ? 7 : 4} distance={type === "bonus" ? 3.5 : 2.5} />
       <mesh position={[0, 0, -0.05]}>
         <ringGeometry args={[radius + 0.05, radius + 0.15, 32]} />
-        <meshBasicMaterial color={isBonus ? "#fbbf24" : "#fb5f4a"} transparent opacity={0.3} depthWrite={false} />
+        <meshBasicMaterial color={lightColor} transparent opacity={0.3} depthWrite={false} />
       </mesh>
     </group>
   );
 }
 
-export function TargetArena({ target, onHit, disabled }: { target: RoundTarget | null; onHit: (target: RoundTarget, worldPos: { x: number; y: number; z: number }) => void; disabled?: boolean }) {
+const getTargetColor = (type: TargetType) => {
+  switch (type) {
+    case "bonus": return "#f7c948";
+    case "decoy": return "#71717a";
+    case "speed": return "#60a5fa";
+    case "moving": return "#4ade80";
+    case "time_freeze": return "#7dd3fc";
+    case "double_points": return "#c084fc";
+    case "shield": return "#34d399";
+    case "normal":
+    default: return "#fb5f4a";
+  }
+};
+
+export function TargetArena({ 
+  target, 
+  onHit, 
+  disabled,
+  theme = "cyber"
+}: { 
+  target: RoundTarget | null; 
+  onHit: (target: RoundTarget, worldPos: { x: number; y: number; z: number }) => void; 
+  disabled?: boolean;
+  theme?: ArenaTheme;
+}) {
   const [explosions, setExplosions] = useState<ExplosionState[]>([]);
 
   const handleHit = (hitTarget: RoundTarget, worldPos: { x: number; y: number; z: number }) => {
-    const isBonus = hitTarget.target_type === "bonus";
-    const color = isBonus ? "#f7c948" : "#fb5f4a";
+    const color = getTargetColor(hitTarget.target_type);
     
     const newExplosion = {
       id: Math.random().toString(),
@@ -206,23 +364,49 @@ export function TargetArena({ target, onHit, disabled }: { target: RoundTarget |
     onHit(hitTarget, worldPos);
   };
 
+  const themeConfig = {
+    cyber: {
+      bg: "#07111f",
+      dirLight: "#dbeafe",
+      point1: "#22d3ee",
+      point2: "#fb7185",
+      floor: "#0c1b2d"
+    },
+    volcanic: {
+      bg: "#1a0a0a",
+      dirLight: "#ffedd5",
+      point1: "#f97316",
+      point2: "#ef4444",
+      floor: "#2a0a0a"
+    },
+    neon: {
+      bg: "#0a0520",
+      dirLight: "#f3e8ff",
+      point1: "#d946ef",
+      point2: "#4ade80",
+      floor: "#1a0b36"
+    }
+  };
+
+  const currentTheme = themeConfig[theme] || themeConfig.cyber;
+
   return (
-    <div className="arena-cursor cursor-crosshair h-full min-h-[360px] w-full touch-none overflow-hidden rounded-[1.35rem] bg-[#07111f]">
+    <div className="arena-cursor h-full w-full touch-none overflow-hidden" style={{ backgroundColor: currentTheme.bg }}>
       <Canvas camera={{ position: [0, 0, 8], fov: 48 }} dpr={[1, 1.5]} gl={{ antialias: true, powerPreference: "high-performance" }} shadows>
         <CameraController />
-        <color attach="background" args={["#07111f"]} />
-        <fog attach="fog" args={["#07111f", 9, 17]} />
+        <color attach="background" args={[currentTheme.bg]} />
+        <fog attach="fog" args={[currentTheme.bg, 9, 17]} />
         <ambientLight intensity={1.15} />
-        <directionalLight castShadow position={[4, 6, 8]} intensity={2.2} color="#dbeafe" />
-        <pointLight position={[-5, -3, 4]} intensity={12} color="#22d3ee" distance={12} />
-        <pointLight position={[5, 3, 2]} intensity={10} color="#fb7185" distance={10} />
+        <directionalLight castShadow position={[4, 6, 8]} intensity={2.2} color={currentTheme.dirLight} />
+        <pointLight position={[-5, -3, 4]} intensity={12} color={currentTheme.point1} distance={12} />
+        <pointLight position={[5, 3, 2]} intensity={10} color={currentTheme.point2} distance={10} />
         
         <mesh position={[0, 0, -1.5]} receiveShadow>
           <planeGeometry args={[16, 16]} />
-          <meshStandardMaterial color="#0c1b2d" roughness={0.92} metalness={0.08} />
+          <meshStandardMaterial color={currentTheme.floor} roughness={0.92} metalness={0.08} />
         </mesh>
         
-        <BackgroundAtmosphere />
+        <BackgroundAtmosphere theme={theme} />
 
         {explosions.map(exp => (
           <ExplosionParticles key={exp.id} explosion={exp} />
