@@ -2,6 +2,11 @@
 -- 3D Target Challenge — apply the MISSING migrations in one paste
 -- ============================================================================
 --
+-- SCOPE: migrations 3 and 4 ONLY. This file is not the complete setup. Check
+-- supabase/migrations/ for anything later — migration 5 (retention) adds the global
+-- leaderboard, the daily challenge and rematches. The numbered migration files are the
+-- source of truth; this bundle only exists because 3 and 4 were once both missing.
+--
 -- Use this only when the project already has migrations 1 and 2 applied.
 -- Symptom you are fixing:
 --   "Could not find the function public.start_round(p_game_mode, p_player_id)

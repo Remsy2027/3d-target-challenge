@@ -3,7 +3,7 @@
 import { Canvas, type ThreeEvent, useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useRef, useState, useMemo } from "react";
 import * as THREE from "three";
-import type { RoundTarget, ArenaTheme, TargetType } from "@/lib/game-types";
+import { TARGET_TYPES, type RoundTarget, type ArenaTheme, type TargetType } from "@/lib/game-types";
 
 export interface ExplosionState {
   id: string;
@@ -294,7 +294,7 @@ function TargetMesh({ target, onHit }: { target: RoundTarget; onHit: (worldPos: 
     <group ref={group} position={[target.pos_x, target.pos_y, target.pos_z]} onPointerDown={hit}>
       <mesh rotation={rot} castShadow>
         {renderGeometry()}
-        <meshStandardMaterial color={outerColor} emissive={outerEmissive} emissiveIntensity={0.48} roughness={0.35} metalness={0.12} />
+        <meshStandardMaterial color={outerColor} emissive={outerEmissive} emissiveIntensity={0.72} roughness={0.3} metalness={0.12} />
       </mesh>
       
       <mesh position={[0, 0, 0.11]} rotation={rot}>
@@ -309,26 +309,15 @@ function TargetMesh({ target, onHit }: { target: RoundTarget; onHit: (worldPos: 
       
       <pointLight color={lightColor} intensity={type === "bonus" ? 7 : 4} distance={type === "bonus" ? 3.5 : 2.5} />
       <mesh position={[0, 0, -0.05]}>
-        <ringGeometry args={[radius + 0.05, radius + 0.15, 32]} />
-        <meshBasicMaterial color={lightColor} transparent opacity={0.3} depthWrite={false} />
+        <ringGeometry args={[radius + 0.05, radius + 0.16, 32]} />
+        <meshBasicMaterial color={lightColor} transparent opacity={0.55} depthWrite={false} />
       </mesh>
     </group>
   );
 }
 
-const getTargetColor = (type: TargetType) => {
-  switch (type) {
-    case "bonus": return "#f7c948";
-    case "decoy": return "#71717a";
-    case "speed": return "#60a5fa";
-    case "moving": return "#4ade80";
-    case "time_freeze": return "#7dd3fc";
-    case "double_points": return "#c084fc";
-    case "shield": return "#34d399";
-    case "normal":
-    default: return "#fb5f4a";
-  }
-};
+/** Read from the shared table so the explosion colour can never drift from the legend. */
+const getTargetColor = (type: TargetType) => TARGET_TYPES[type].colour;
 
 export function TargetArena({ 
   target, 
@@ -391,8 +380,12 @@ export function TargetArena({
   const currentTheme = themeConfig[theme] || themeConfig.cyber;
 
   return (
-    <div className="arena-cursor h-full w-full touch-none overflow-hidden" style={{ backgroundColor: currentTheme.bg }}>
-      <Canvas camera={{ position: [0, 0, 8], fov: 48 }} dpr={[1, 1.5]} gl={{ antialias: true, powerPreference: "high-performance" }} shadows>
+    <div className="arena-cursor relative h-full w-full touch-none overflow-hidden" style={{ backgroundColor: currentTheme.bg }}>
+      {/* dpr used to cap at 1.5, which halved the resolution on a DPR-3 phone and made the
+          whole arena look soft. Two targets are on screen at most, so the cost is small.
+          PCFShadowMap is named explicitly because three r186 removed PCFSoftShadowMap,
+          which the bare `shadows` prop still requests — and it warned on every frame. */}
+      <Canvas camera={{ position: [0, 0, 8], fov: 48 }} dpr={[1, 2]} gl={{ antialias: true, powerPreference: "high-performance" }} shadows={{ type: THREE.PCFShadowMap }}>
         <CameraController />
         <color attach="background" args={[currentTheme.bg]} />
         <fog attach="fog" args={[currentTheme.bg, 9, 17]} />
@@ -404,6 +397,13 @@ export function TargetArena({
         <mesh position={[0, 0, -1.5]} receiveShadow>
           <planeGeometry args={[16, 16]} />
           <meshStandardMaterial color={currentTheme.floor} roughness={0.92} metalness={0.08} />
+        </mesh>
+
+        {/* Floor haze: a barely-there additive disc that lifts the playfield off the
+            background, so the arena reads as a lit volume instead of a flat void. */}
+        <mesh position={[0, 0, -1.42]}>
+          <circleGeometry args={[7.5, 48]} />
+          <meshBasicMaterial color={currentTheme.point1} transparent opacity={0.05} blending={THREE.AdditiveBlending} depthWrite={false} />
         </mesh>
         
         <BackgroundAtmosphere theme={theme} />
@@ -420,6 +420,9 @@ export function TargetArena({
           />
         )}
       </Canvas>
+      {/* Centre glow, drawn in CSS rather than WebGL because it only ever adds light: it
+          brightens the middle of the playfield without dimming a target near an edge. */}
+      <div className="arena-glow pointer-events-none absolute inset-0" style={{ background: `radial-gradient(ellipse 58% 54% at 50% 50%, ${currentTheme.point1}1f 0%, transparent 70%)` }} />
     </div>
   );
 }

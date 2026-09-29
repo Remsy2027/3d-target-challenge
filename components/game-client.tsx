@@ -1,16 +1,19 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, CircleHelp, Copy, Crown, LoaderCircle, LogOut, Radio, RotateCcw, Swords, Target, Trophy, Users, WifiOff, Zap, Volume2, VolumeX, Palette } from "lucide-react";
+import { CalendarDays, Check, CircleHelp, Copy, Crown, LoaderCircle, LogOut, Medal, Play, Radio, RotateCcw, Swords, Target, Trophy, Users, WifiOff, Zap, Volume2, VolumeX, Palette } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { TargetArena } from "@/components/target-arena";
-import type { GameRound, Player, Room, RoomSnapshot, RoundPlayer, RoundTarget, ClientStats, ArenaTheme, GameMode, SubmitHitResult } from "@/lib/game-types";
-import { ensureAnonymousSession, findMissingMigrations, isSupabaseConfigured, supabase } from "@/lib/supabase";
+import { TARGET_TYPES, type GameRound, type Player, type Room, type RoomSnapshot, type RoundPlayer, type RoundTarget, type ClientStats, type ArenaTheme, type GameMode, type SubmitHitResult, type LeaderboardRow, type TargetTypeInfo } from "@/lib/game-types";
+import { ensureAnonymousSession, fetchLeaderboard, findMissingMigrations, isSupabaseConfigured, supabase } from "@/lib/supabase";
 import { play, playHitSound, playBonusHitSound, playMissSound, playCountdownBeep, playGoSound, playComboSound, playRoundEndSound, playDecoyHitSound, playSpeedHitSound, playPowerupSound, isMuted, toggleMute } from "@/lib/sounds";
 
 const STORAGE_KEY = "target-challenge-player";
+
+/** Every ClientStats field at zero, applied whenever a new round begins. */
+const EMPTY_CLIENT_STATS: ClientStats = { streak: 0, bestStreak: 0, hits: 0, misses: 0, multiplier: 1, shieldActive: false, doublePointsHitsRemaining: 0, freezeCharges: 0 };
 
 /**
  * Supabase/PostgREST errors are plain objects, not Error instances, so
@@ -24,15 +27,81 @@ function errorMessage(cause: unknown, fallback: string): string {
   return fallback;
 }
 
+/**
+ * Deliberately says nothing about individual target values — the legend next to it does,
+ * from the same table the server scores with. The old copy here claimed "red = 10, gold =
+ * 25", which stopped being the whole truth once streaks and decoys landed.
+ */
 function Rules({ compact = false }: { compact?: boolean }) {
+  const rules = [
+    "Join with a room code and mark yourself Ready. The host can start at two players.",
+    "Targets speed up as the round runs: each one is visible from 1200 ms down to 600 ms.",
+    "Chain hits for a multiplier — 3 in a row is ×1.5, 5 is ×2, 10 is ×3 on everything you score.",
+    "New target types appear as the round goes on. The legend below says what each one is worth.",
+    "Highest server-confirmed score when the 60 seconds run out wins.",
+  ];
   return (
     <div className={compact ? "grid gap-2 text-sm text-slate-300" : "grid gap-3 text-[0.95rem] text-slate-300"}>
-      <div className="flex items-center gap-3"><span className="rule-number">1</span><span>Join with a room code and mark yourself Ready.</span></div>
-      <div className="flex items-center gap-3"><span className="rule-number">2</span><span>The host starts when at least 2 players are ready.</span></div>
-      <div className="flex items-center gap-3"><span className="rule-number">3</span><span>Hit targets for 60 seconds. Red = 10 points, gold = 25.</span></div>
-      <div className="flex items-center gap-3"><span className="rule-number">4</span><span>The highest server-confirmed score wins.</span></div>
+      {rules.map((rule, index) => (
+        <div key={rule} className="flex items-start gap-3"><span className="rule-number">{index + 1}</span><span>{rule}</span></div>
+      ))}
     </div>
   );
+}
+
+/** Colour, name and worth of every target type — the answer to "what was that grey thing?" */
+function TargetLegend({ dense = false, className = "" }: { dense?: boolean; className?: string }) {
+  const types = Object.keys(TARGET_TYPES) as Array<keyof typeof TARGET_TYPES>;
+  if (dense) {
+    return (
+      <ul className={`grid grid-cols-2 gap-1.5 ${className}`}>
+        {types.map((type) => {
+          const info = TARGET_TYPES[type];
+          return (
+            <li key={type} title={info.description} className="flex items-center gap-2 rounded-lg border border-white/[0.07] bg-white/[0.035] px-2 py-1.5">
+              <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: info.colour, boxShadow: `0 0 8px ${info.colour}` }} />
+              <span className="min-w-0 flex-1 truncate text-xs font-bold text-slate-200">{info.label}</span>
+              <span className={`font-mono text-[0.7rem] font-black ${valueToneClass(info.tone)}`}>{info.points}</span>
+            </li>
+          );
+        })}
+      </ul>
+    );
+  }
+  return (
+    <ul className={`grid gap-2 ${className}`}>
+      {types.map((type) => {
+        const info = TARGET_TYPES[type];
+        return (
+          <li key={type} className="flex items-start gap-3 rounded-xl border border-white/[0.07] bg-white/[0.035] p-2.5">
+            <span className="mt-1 size-3 shrink-0 rounded-full" style={{ backgroundColor: info.colour, boxShadow: `0 0 10px ${info.colour}` }} />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="font-bold text-white">{info.label}</span>
+                <span className={`shrink-0 font-mono text-sm font-black ${valueToneClass(info.tone)}`}>{info.points}</span>
+              </div>
+              {/* On phones the legend keeps just the swatch, name and value — eight
+                  descriptions made this card 854px tall. */}
+              <p className="hidden text-xs leading-5 text-slate-400 sm:block">{info.description}</p>
+            </div>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function valueToneClass(tone: TargetTypeInfo["tone"]) {
+  if (tone === "penalty") return "text-red-300";
+  if (tone === "power") return "text-cyan-200";
+  return "text-amber-200";
+}
+
+/** The on-screen banner for whatever target is live, colour-coded by what it does. */
+function calloutToneClass(tone: TargetTypeInfo["tone"]) {
+  if (tone === "penalty") return "animate-pulse border-red-400/45 bg-red-400/20 text-red-100";
+  if (tone === "power") return "border-cyan-300/35 bg-cyan-300/15 text-cyan-100";
+  return "border-amber-300/35 bg-amber-300/15 text-amber-100";
 }
 
 function Brand() {
@@ -109,7 +178,7 @@ function SchemaOutdated({ migrations }: { migrations: string[] }) {
           <CardDescription className="text-slate-400">Your Supabase project is missing database migrations, so the host cannot start a round.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3 text-sm text-slate-300">
-          <p>In the Supabase dashboard open <strong className="text-white">SQL Editor</strong>, paste <code>supabase/apply-missing-migrations.sql</code> from this project, run it once, then reload this page.</p>
+          <p>In the Supabase dashboard open <strong className="text-white">SQL Editor</strong>, run each file below as a new query in order, then reload this page. They live in <code>supabase/migrations/</code>.</p>
           <p className="font-bold text-slate-400">Still to run</p>
           <ul className="grid gap-1 font-mono text-xs text-amber-200">
             {migrations.map((name) => <li key={name}>{name}</li>)}
@@ -121,19 +190,25 @@ function SchemaOutdated({ migrations }: { migrations: string[] }) {
   );
 }
 
-function HomeScreen({ initialCode, busy, error, onCreate, onJoin }: { initialCode: string; busy: boolean; error: string; onCreate: (name: string) => Promise<void>; onJoin: (name: string, code: string) => Promise<void> }) {
+function HomeScreen({ initialCode, busy, error, leaderboard, dailyBoard, onCreate, onJoin, onDaily }: { initialCode: string; busy: boolean; error: string; leaderboard: LeaderboardRow[]; dailyBoard: LeaderboardRow[]; onCreate: (name: string) => Promise<void>; onJoin: (name: string, code: string) => Promise<void>; onDaily: (name: string) => Promise<void> }) {
   const [name, setName] = useState("");
   const [code, setCode] = useState(initialCode);
+  const canPlay = name.trim().length >= 2;
+  const myDaily = dailyBoard.find((row) => row.is_you);
+  const today = new Date().toISOString().slice(0, 10);
   return (
     <Shell>
-      <div className="grid w-full max-w-5xl gap-4 sm:gap-6 md:grid-cols-[1.05fr_.95fr] animate-fade-up">
-        <section className="order-2 flex flex-col justify-center rounded-[1.5rem] border border-cyan-300/10 sm:rounded-[2rem] md:order-1 bg-[radial-gradient(circle_at_15%_20%,rgba(34,211,238,.14),transparent_34%),radial-gradient(circle_at_90%_80%,rgba(255,104,79,.14),transparent_34%)] p-5 sm:p-8 lg:p-10">
+      {/* The two action cards lead on phones; the hero copy and its rules sit last. */}
+      <div className="grid w-full max-w-5xl gap-4 sm:gap-6 md:grid-cols-2 animate-fade-up">
+        <section className="order-3 flex flex-col justify-center rounded-[1.5rem] border border-cyan-300/10 sm:rounded-[2rem] md:order-1 bg-[radial-gradient(circle_at_15%_20%,rgba(34,211,238,.14),transparent_34%),radial-gradient(circle_at_90%_80%,rgba(255,104,79,.14),transparent_34%)] p-5 sm:p-8 lg:p-10">
           <div className="mb-5 inline-flex w-fit items-center gap-2 rounded-full border border-cyan-300/20 sm:mb-7 bg-cyan-300/10 px-3 py-1.5 text-xs font-bold uppercase tracking-[0.16em] text-cyan-200"><Swords className="size-3.5" /> 2–8 players</div>
           <h1 className="max-w-xl text-[2rem] font-black leading-[1.02] tracking-[-0.055em] text-white sm:text-5xl lg:text-6xl">Aim fast.<br /><span className="text-[#ff765e]">Climb the board.</span></h1>
           <p className="mt-4 max-w-lg text-sm leading-6 text-slate-300 sm:mt-5 sm:text-base sm:leading-7">Create a room, invite your friends, and race through the same 60-second target challenge.</p>
           <div className="mt-6 rounded-2xl border border-white/10 bg-black/20 p-4 sm:mt-8 sm:p-5">
             <div className="mb-4 flex items-center gap-2 font-bold text-white"><CircleHelp className="size-5 text-cyan-300" /> How to play</div>
             <Rules compact />
+            <p className="mb-2 mt-4 text-[0.7rem] font-black uppercase tracking-[0.16em] text-slate-500">Targets</p>
+            <TargetLegend dense />
           </div>
         </section>
         <Card className="glass-card order-1 justify-center md:order-2">
@@ -150,6 +225,31 @@ function HomeScreen({ initialCode, busy, error, onCreate, onJoin }: { initialCod
             {error && <p role="alert" className="rounded-xl border border-red-400/20 bg-red-400/10 p-3 text-sm text-red-200">{error}</p>}
           </CardContent>
         </Card>
+
+        <Card className="glass-card order-2 md:order-3">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-xl text-white sm:text-2xl"><CalendarDays className="size-5 text-cyan-300" /> Daily challenge</CardTitle>
+            <CardDescription className="text-slate-400">The same 60 targets for everyone. Resets at midnight UTC on {today}.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+              <div className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Your best today</div>
+              <div className="mt-1 flex items-center gap-2">
+                <span className="font-mono text-2xl font-black text-white">{myDaily ? myDaily.score : "—"}</span>
+                {myDaily?.rank === 1 && <span className="rounded-full bg-amber-400/10 px-2.5 py-1 text-[0.7rem] font-black uppercase tracking-widest text-amber-300">Today's leader</span>}
+                {myDaily && myDaily.rank > 1 && <span className="text-xs font-bold text-cyan-300">Rank #{myDaily.rank} today</span>}
+              </div>
+            </div>
+            <Button className="game-button h-12 w-full" disabled={busy || !canPlay} onClick={() => onDaily(name)}>{busy ? <LoaderCircle className="animate-spin" /> : <Play />} Play the daily</Button>
+            {!canPlay && <p className="text-center text-xs text-slate-500">Enter your name above to play.</p>}
+          </CardContent>
+        </Card>
+
+        {/* Phones: act, then the game's identity, then what you're chasing. The hero sits
+            above the board because a new project's board is empty until people play. */}
+        <div className="order-4 md:order-4">
+          <HallOfFame allTime={leaderboard} daily={dailyBoard} />
+        </div>
       </div>
     </Shell>
   );
@@ -170,6 +270,70 @@ function Leaderboard({ players, scores, currentPlayerId, className = "space-y-2"
         </li>
       ))}
     </ol>
+  );
+}
+
+function LeaderboardRows({ rows, emptyText }: { rows: LeaderboardRow[]; emptyText: string }) {
+  if (rows.length === 0) return <p className="text-sm text-slate-400">{emptyText}</p>;
+  return (
+    <ol className="grid gap-2">
+      {rows.map((row) => (
+        <li key={row.rank} className={`flex items-center gap-2.5 rounded-xl border px-2.5 py-2 ${row.is_you ? "border-cyan-300/25 bg-cyan-300/10" : "border-white/[0.07] bg-white/[0.035]"}`}>
+          <span className={`grid size-6 shrink-0 place-items-center rounded-lg text-xs font-black ${row.rank === 1 ? "bg-amber-300 text-amber-950" : row.rank === 2 ? "bg-slate-300 text-slate-900" : row.rank === 3 ? "bg-amber-700 text-amber-50" : "bg-white/10 text-slate-300"}`}>{row.rank}</span>
+          <span className="min-w-0 flex-1 truncate font-bold text-white">{row.display_name}{row.is_you ? " (you)" : ""}</span>
+          <span className="font-mono font-black text-cyan-200">{row.score}</span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+/**
+ * The two global boards, from the get_leaderboard RPC. "All time" is the reason to
+ * keep playing; "Today" is the daily challenge, which resets at midnight UTC.
+ */
+function HallOfFame({ allTime, daily }: { allTime: LeaderboardRow[]; daily: LeaderboardRow[] }) {
+  const [scope, setScope] = useState<"all" | "daily">("all");
+  const rows = scope === "all" ? allTime : daily;
+  return (
+    <Card className="glass-card h-full">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-xl text-white sm:text-2xl"><Medal className="size-5 text-amber-300" /> Hall of fame</CardTitle>
+        <CardDescription className="text-slate-400">{scope === "all" ? "Best score ever, across every room." : "Today's daily challenge."}</CardDescription>
+        <div className="flex gap-1.5 pt-3">
+          {(["all", "daily"] as const).map((value) => (
+            <button key={value} type="button" onClick={() => setScope(value)} aria-pressed={scope === value} className={`rounded-lg px-3 py-1.5 text-xs font-black uppercase tracking-wider transition ${scope === value ? "bg-white text-slate-950" : "bg-white/[0.06] text-slate-400 hover:text-white"}`}>
+              {value === "all" ? "All time" : "Today"}
+            </button>
+          ))}
+        </div>
+      </CardHeader>
+      <CardContent>
+        <LeaderboardRows rows={rows} emptyText={scope === "all" ? "No rounds played yet — be the first name on the board." : "Nobody has played today's challenge yet."} />
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * Running best-of-N across a room's finished rounds. The room's own rounds are
+ * readable by any member, so this needs no server support.
+ */
+function SeriesStrip({ players, wins, currentPlayerId, className = "" }: { players: Player[]; wins: Record<string, number>; currentPlayerId: string; className?: string }) {
+  const standings = players.filter((player) => (wins[player.id] ?? 0) > 0).sort((a, b) => (wins[b.id] ?? 0) - (wins[a.id] ?? 0));
+  if (standings.length === 0) return null;
+  return (
+    <div className={className}>
+      <p className="mb-2 text-[0.7rem] font-black uppercase tracking-[0.16em] text-slate-500">Series wins</p>
+      <div className="flex flex-wrap gap-2">
+        {standings.map((player) => (
+          <span key={player.id} className={`flex items-center gap-2 rounded-xl border px-2.5 py-1.5 text-sm font-bold ${player.id === currentPlayerId ? "border-cyan-300/30 bg-cyan-300/10 text-cyan-100" : "border-white/[0.08] bg-white/[0.035] text-slate-200"}`}>
+            <span className="max-w-[9rem] truncate">{player.display_name}{player.id === currentPlayerId ? " (you)" : ""}</span>
+            <span className="font-mono font-black text-white">{wins[player.id]}</span>
+          </span>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -219,13 +383,25 @@ function LobbyScreen({ room, players, currentPlayerId, busy, error, connected, o
             <button onClick={onLeave} className="mx-auto flex items-center gap-2 text-sm font-semibold text-slate-500 transition hover:text-white"><LogOut className="size-4" /> Leave room</button>
           </CardContent>
         </Card>
-        <Card className="glass-card"><CardHeader><CardTitle className="flex items-center gap-2 text-xl text-white"><CircleHelp className="size-5 text-cyan-300" /> Game rules</CardTitle></CardHeader><CardContent><Rules /></CardContent></Card>
+        <Card className="glass-card">
+          <CardHeader><CardTitle className="flex items-center gap-2 text-xl text-white"><CircleHelp className="size-5 text-cyan-300" /> How a round works</CardTitle></CardHeader>
+          <CardContent><Rules /></CardContent>
+        </Card>
+        {/* The legend gets the full width instead of stretching the narrow rules column into
+            a very tall card beside a short one — and four columns let it fit on one screen. */}
+        <Card className="glass-card md:col-span-2">
+          <CardHeader>
+            <CardTitle className="text-xl text-white">Targets &amp; scoring</CardTitle>
+            <CardDescription className="text-slate-400">Every type you can meet in a round, and what it does to your score.</CardDescription>
+          </CardHeader>
+          <CardContent><TargetLegend className="sm:grid-cols-2 xl:grid-cols-4" /></CardContent>
+        </Card>
       </div>
     </Shell>
   );
 }
 
-function GameScreen({ snapshot, currentPlayerId, clockOffset, connected, clientStats, setClientStats, onHit, onFinish }: { snapshot: RoomSnapshot; currentPlayerId: string; clockOffset: number; connected: boolean; clientStats: ClientStats; setClientStats: React.Dispatch<React.SetStateAction<ClientStats>>; onHit: (target: RoundTarget, worldPos?: { x: number; y: number; z: number }) => Promise<SubmitHitResult | null>; onFinish: () => Promise<void> }) {
+function GameScreen({ snapshot, currentPlayerId, clockOffset, connected, clientStats, seriesWins, setClientStats, onHit, onFinish }: { snapshot: RoomSnapshot; currentPlayerId: string; clockOffset: number; connected: boolean; clientStats: ClientStats; seriesWins: Record<string, number>; setClientStats: React.Dispatch<React.SetStateAction<ClientStats>>; onHit: (target: RoundTarget, worldPos?: { x: number; y: number; z: number }) => Promise<SubmitHitResult | null>; onFinish: () => Promise<void> }) {
   const round = snapshot.round!;
   const [now, setNow] = useState(Date.now() + clockOffset);
   const [hitIndexes, setHitIndexes] = useState(() => new Set(snapshot.hitTargetIndexes));
@@ -366,8 +542,10 @@ function GameScreen({ snapshot, currentPlayerId, clockOffset, connected, clientS
           <div className={`timer-chip flex-1 ${remaining <= 10 ? "timer-danger" : ""}`}><span>{secondsToStart > 0 ? "Starts in" : "Time"}</span><strong>{secondsToStart > 0 ? secondsToStart : remaining}</strong></div>
         </div>
 
-        <div className="grid min-h-0 flex-1 content-start gap-2 sm:gap-3 lg:content-normal lg:grid-cols-[minmax(0,1fr)_300px]">
-          <section className="relative aspect-[4/3] w-full self-start overflow-hidden rounded-2xl border border-white/[0.08] bg-[#07111f] sm:aspect-[16/9] lg:aspect-auto lg:h-full lg:min-h-0 lg:self-stretch lg:rounded-[1.5rem]">
+        {/* The arena takes every pixel the chrome leaves behind rather than holding a fixed
+            aspect ratio, which on a 390x844 phone left 27% of the viewport empty. */}
+        <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto] gap-2 sm:gap-3 lg:grid-cols-[minmax(0,1fr)_300px] lg:grid-rows-1">
+          <section className="relative min-h-[220px] w-full overflow-hidden rounded-2xl border border-white/[0.08] bg-[#07111f] lg:min-h-0 lg:rounded-[1.5rem]">
             {hitFlash && <div className={`hit-flash hit-flash-${hitFlash}`} />}
             
             {floatingTexts.map(t => (
@@ -391,8 +569,19 @@ function GameScreen({ snapshot, currentPlayerId, clockOffset, connected, clientS
                     </div>
                   )}
                   
-                  <div className="pointer-events-none absolute inset-x-0 top-5 flex justify-center z-20">
-                    {!isParticipant ? <div className="rounded-full border border-white/10 bg-black/45 px-4 py-2 text-sm font-bold text-slate-200 backdrop-blur">Spectating this round</div> : secondsToStart > 0 ? <div className="countdown-bubble"><span>Get ready</span><strong>{secondsToStart}</strong></div> : isEliminated ? null : !activeTarget && remaining > 0 ? <div className="rounded-full border border-white/10 bg-black/35 px-4 py-2 text-sm font-bold text-slate-300 backdrop-blur">Next target…</div> : activeTarget?.target_type === "bonus" ? <div className="rounded-full border border-amber-300/30 bg-amber-300/15 px-4 py-2 text-sm font-black text-amber-200 backdrop-blur">BONUS · 25 POINTS</div> : null}
+                  <div className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-center px-2 sm:top-5">
+                    {(() => {
+                      if (!isParticipant) return <div className="rounded-full border border-white/10 bg-black/45 px-4 py-2 text-sm font-bold text-slate-200 backdrop-blur">Spectating this round</div>;
+                      if (secondsToStart > 0) return <div className="countdown-bubble"><span>Get ready</span><strong>{secondsToStart}</strong></div>;
+                      if (isEliminated) return null;
+                      if (!activeTarget) return remaining > 0 ? <div className="rounded-full border border-white/10 bg-black/35 px-4 py-2 text-sm font-bold text-slate-300 backdrop-blur">Next target…</div> : null;
+                      // Every special type announces itself, not just the bonus one. The decoy
+                      // matters most: it is the only target that costs points, and the old UI
+                      // gave it no text at all.
+                      const info = TARGET_TYPES[activeTarget.target_type];
+                      if (!info.callout) return null;
+                      return <div className={`rounded-full border px-3 py-1.5 text-xs font-black uppercase tracking-wide backdrop-blur sm:px-4 sm:py-2 sm:text-sm ${calloutToneClass(info.tone)}`}>{info.callout}</div>;
+                    })()}
                   </div>
                 </>
               );
@@ -401,7 +590,14 @@ function GameScreen({ snapshot, currentPlayerId, clockOffset, connected, clientS
           <aside className="rounded-2xl border border-white/[0.08] bg-[#0b1524] p-3 sm:p-4 lg:rounded-[1.5rem]">
             <div className="mb-3 flex items-center justify-between gap-2 sm:mb-4"><h2 className="flex items-center gap-2 text-sm font-black text-white sm:text-base"><Trophy className="size-4 text-amber-300 sm:size-5" /> Live leaderboard</h2><span className="text-[0.7rem] font-bold uppercase tracking-wider text-slate-500 sm:text-xs">Round {round.round_number}</span></div>
             <Leaderboard players={snapshot.players} scores={snapshot.roundPlayers} currentPlayerId={currentPlayerId} compact className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1" />
-            <div className="mt-3 rounded-xl border border-white/[0.07] bg-white/[0.035] p-3 text-[0.7rem] leading-5 text-slate-400 sm:mt-4 sm:text-xs"><strong className="text-[#ff8b77]">Red targets</strong> give 10 points. <strong className="text-amber-300">Small gold targets</strong> give 25.</div>
+            {/* Desktop only. The sidebar had roughly 500px of unused height, whereas on a
+                phone this legend would eat the space the arena just reclaimed — phones get
+                the in-game callouts and the lobby legend instead. */}
+            <div className="mt-3 hidden border-t border-white/[0.07] pt-3 sm:mt-4 lg:block">
+              <p className="mb-2 text-[0.7rem] font-black uppercase tracking-[0.16em] text-slate-500">Targets</p>
+              <TargetLegend dense />
+            </div>
+            <SeriesStrip players={snapshot.players} wins={seriesWins} currentPlayerId={currentPlayerId} className="mt-3 border-t border-white/[0.07] pt-3 sm:mt-4" />
           </aside>
         </div>
       </div>
@@ -409,12 +605,22 @@ function GameScreen({ snapshot, currentPlayerId, clockOffset, connected, clientS
   );
 }
 
-function ResultsScreen({ snapshot, currentPlayerId, connected, busy, error, clientStats, onLobby, onLeave }: { snapshot: RoomSnapshot; currentPlayerId: string; connected: boolean; busy: boolean; error: string; clientStats: ClientStats; onLobby: () => Promise<void>; onLeave: () => void }) {
+function ResultsScreen({ snapshot, currentPlayerId, connected, busy, error, clientStats, seriesWins, onLobby, onRematch, onLeave }: { snapshot: RoomSnapshot; currentPlayerId: string; connected: boolean; busy: boolean; error: string; clientStats: ClientStats; seriesWins: Record<string, number>; onLobby: () => Promise<void>; onRematch: () => Promise<void>; onLeave: () => void }) {
   const scoreMap = new Map(snapshot.roundPlayers.map((score) => [score.player_id, score.score]));
   const ranked = snapshot.players.filter((player) => scoreMap.has(player.id)).sort((a, b) => (scoreMap.get(b.id) ?? 0) - (scoreMap.get(a.id) ?? 0));
   const topScore = ranked.length ? scoreMap.get(ranked[0].id) ?? 0 : 0;
   const winners = ranked.filter((player) => (scoreMap.get(player.id) ?? 0) === topScore);
   const isHost = snapshot.room.host_player_id === currentPlayerId;
+
+  // A round nobody scored in used to headline as "X & Y tie!" above "Top score: 0 points",
+  // which reads as a broken round rather than an invitation to go again.
+  const scored = topScore > 0;
+  const headline = !scored
+    ? "Nobody scored this round"
+    : winners.length > 1
+      ? `${winners.map((player) => player.display_name).join(" & ")} tie!`
+      : `${winners[0]?.display_name ?? "No one"} wins!`;
+  const subhead = scored ? `Top score: ${topScore} points` : "A blank board — the next one is yours.";
 
   const [pb, setPb] = useState<number>(0);
   useEffect(() => {
@@ -438,8 +644,9 @@ function ResultsScreen({ snapshot, currentPlayerId, connected, busy, error, clie
         <div className="border-b border-white/[0.08] bg-[radial-gradient(circle_at_50%_0%,rgba(251,191,36,.18),transparent_62%)] px-4 py-6 text-center sm:px-6 sm:py-8">
           <div className="mx-auto mb-3 grid size-14 place-items-center rounded-2xl bg-amber-300 text-amber-950 shadow-[0_10px_45px_rgba(251,191,36,.25)] sm:mb-4 sm:size-16"><Trophy className="size-7 sm:size-8" /></div>
           <p className="text-xs font-black uppercase tracking-[0.2em] text-amber-300">Round complete</p>
-          <h1 className="mt-2 text-3xl font-black tracking-tight text-white sm:text-4xl">{winners.length > 1 ? `${winners.map((player) => player.display_name).join(" & ")} tie!` : `${winners[0]?.display_name ?? "No one"} wins!`}</h1>
-          <p className="mt-2 text-slate-400">Top score: {topScore} points</p>
+          <h1 className="mt-2 text-3xl font-black tracking-tight text-white sm:text-4xl">{headline}</h1>
+          <p className="mt-2 text-slate-400">{subhead}</p>
+          {snapshot.room.is_daily && <p className="mt-3 inline-flex items-center gap-1.5 rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1 text-[0.7rem] font-black uppercase tracking-[0.16em] text-cyan-200"><CalendarDays className="size-3.5" /> Daily challenge</p>}
         </div>
         <CardContent className="space-y-4 pt-5 sm:space-y-5 sm:pt-6">
           <div className="mb-4 flex flex-col items-center justify-center gap-1 rounded-xl border border-white/5 bg-black/20 p-3 sm:p-4">
@@ -449,8 +656,15 @@ function ResultsScreen({ snapshot, currentPlayerId, connected, busy, error, clie
             {pb > 0 && <div className="mt-3 text-xs font-black uppercase tracking-widest text-amber-300 bg-amber-400/10 px-3 py-1.5 rounded-full">Personal Best: {pb}</div>}
           </div>
           
+          <SeriesStrip players={snapshot.players} wins={seriesWins} currentPlayerId={currentPlayerId} className="rounded-xl border border-white/[0.07] bg-white/[0.035] p-3" />
+
           <Leaderboard players={snapshot.players} scores={snapshot.roundPlayers} currentPlayerId={currentPlayerId} />
-          {isHost ? <Button className="game-button h-12 w-full" disabled={busy} onClick={onLobby}><RotateCcw /> Play another round</Button> : <div className="grid h-12 place-items-center rounded-xl border border-white/10 bg-white/[0.035] text-sm text-slate-400">Waiting for the host to open the lobby</div>}
+          {isHost ? (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Button className="game-button h-12 w-full" disabled={busy} onClick={onRematch}><RotateCcw /> Rematch</Button>
+              <Button variant="outline" className="h-12 w-full border-white/15 bg-white/[0.05] text-white hover:bg-white/10 hover:text-white" disabled={busy} onClick={onLobby}><Users /> Back to lobby</Button>
+            </div>
+          ) : <div className="grid h-12 place-items-center rounded-xl border border-white/10 bg-white/[0.035] text-sm text-slate-400">Waiting for the host to start a rematch</div>}
           {error && <p role="alert" className="rounded-xl border border-red-400/20 bg-red-400/10 p-3 text-sm text-red-200">{error}</p>}
           <button onClick={onLeave} className="mx-auto flex items-center gap-2 text-sm font-semibold text-slate-500 transition hover:text-white"><LogOut className="size-4" /> Leave room</button>
         </CardContent>
@@ -469,20 +683,29 @@ export function GameClient() {
   const [clockOffset, setClockOffset] = useState(0);
   const [missingMigrations, setMissingMigrations] = useState<string[]>([]);
   
-  const [clientStats, setClientStats] = useState<ClientStats>({ streak: 0, bestStreak: 0, hits: 0, misses: 0, multiplier: 1, shieldActive: false, doublePointsHitsRemaining: 0, freezeCharges: 0 });
+  const [clientStats, setClientStats] = useState<ClientStats>(EMPTY_CLIENT_STATS);
+  const [leaderboard, setLeaderboard] = useState<LeaderboardRow[]>([]);
+  const [dailyBoard, setDailyBoard] = useState<LeaderboardRow[]>([]);
+  const [series, setSeries] = useState<Record<string, number>>({});
   
   const snapshotRef = useRef<RoomSnapshot | null>(null);
   snapshotRef.current = snapshot;
 
+  const statsRoundRef = useRef<string | null>(null);
   useEffect(() => {
-    if (snapshot?.room.status === "lobby") {
-      setClientStats({ streak: 0, bestStreak: 0, hits: 0, misses: 0, multiplier: 1, shieldActive: false, doublePointsHitsRemaining: 0, freezeCharges: 0 });
-    }
-  }, [snapshot?.room.status]);
+    // Keyed on the round, not the room status. A rematch moves results -> active and
+    // never passes through the lobby, so a status-keyed reset would leak the previous
+    // round's streak, hits and multiplier into the new round. Keying on the round
+    // instead also preserves those stats while the results screen is displaying them.
+    const key = snapshot?.round?.id ?? null;
+    if (key === statsRoundRef.current) return;
+    statsRoundRef.current = key;
+    setClientStats(EMPTY_CLIENT_STATS);
+  }, [snapshot?.round?.id]);
 
   const loadSnapshot = useCallback(async (roomId: string, activePlayerId: string) => {
     if (!supabase) return;
-    const { data: room, error: roomError } = await supabase.from("rooms").select("id,code,host_player_id,status,active_round_id").eq("id", roomId).single();
+    const { data: room, error: roomError } = await supabase.from("rooms").select("id,code,host_player_id,status,active_round_id,game_mode,is_daily,daily_date").eq("id", roomId).single();
     if (roomError) throw roomError;
     const { data: players, error: playersError } = await supabase.from("players").select("id,room_id,user_id,display_name,is_ready,joined_at").eq("room_id", roomId).order("joined_at");
     if (playersError) throw playersError;
@@ -517,6 +740,57 @@ export function GameClient() {
     if (data) setClockOffset(new Date(data as string).getTime() - (before + after) / 2);
   }, []);
 
+  /**
+   * Wins per player across the room's finished rounds. Any member can read their own
+   * room's rounds, so a series score needs no server support. Failures are swallowed:
+   * the series is decoration and must never stop a round from running.
+   */
+  const loadSeries = useCallback(async (roomId: string) => {
+    if (!supabase) return;
+    const { data: rounds, error: roundsError } = await supabase
+      .from("rounds").select("id").eq("room_id", roomId).eq("status", "results").order("round_number", { ascending: false }).limit(50);
+    if (roundsError) { setSeries({}); return; }
+    const roundIds = (rounds ?? []).map((round) => round.id);
+    if (roundIds.length === 0) { setSeries({}); return; }
+    const { data: scores, error: scoresError } = await supabase
+      .from("round_players").select("round_id,player_id,score").in("round_id", roundIds);
+    if (scoresError) { setSeries({}); return; }
+    const byRound = new Map<string, Array<{ player_id: string; score: number }>>();
+    for (const row of (scores ?? []) as Array<{ round_id: string; player_id: string; score: number }>) {
+      const bucket = byRound.get(row.round_id);
+      if (bucket) bucket.push(row);
+      else byRound.set(row.round_id, [row]);
+    }
+    const wins: Record<string, number> = {};
+    for (const rows of byRound.values()) {
+      const top = Math.max(...rows.map((row) => row.score));
+      if (top <= 0) continue;
+      for (const row of rows) if (row.score === top) wins[row.player_id] = (wins[row.player_id] ?? 0) + 1;
+    }
+    setSeries(wins);
+  }, []);
+
+  const loadBoards = useCallback(async () => {
+    try {
+      const [allTime, daily] = await Promise.all([fetchLeaderboard(10), fetchLeaderboard(10, true)]);
+      setLeaderboard(allTime);
+      setDailyBoard(daily);
+    } catch {
+      // Boards are decorative; a failure here must not take the home screen down.
+    }
+  }, []);
+
+  // Reload the series only when a different round appears, not on every realtime tick.
+  const seriesKeyRef = useRef("");
+  useEffect(() => {
+    const roomId = snapshot?.room.id;
+    if (!roomId) { seriesKeyRef.current = ""; return; }
+    const key = `${roomId}:${snapshot?.round?.round_number ?? 0}`;
+    if (seriesKeyRef.current === key) return;
+    seriesKeyRef.current = key;
+    void loadSeries(roomId);
+  }, [loadSeries, snapshot?.room.id, snapshot?.round?.round_number]);
+
   useEffect(() => {
     const restore = async () => {
       if (!supabase) { setLoading(false); return; }
@@ -525,17 +799,24 @@ export function GameClient() {
         await syncClock();
         setMissingMigrations(await findMissingMigrations());
         const stored = window.localStorage.getItem(STORAGE_KEY);
-        if (!stored) return;
+        if (!stored) {
+          // Fetched here rather than in its own effect so the boards reuse the anonymous
+          // session the game already needs — auth.uid() must exist first, or every row
+          // would come back with is_you: false. Deliberately not awaited: the boards must
+          // never delay the first paint.
+          void loadBoards();
+          return;
+        }
         const saved = JSON.parse(stored) as { playerId: string; roomId: string };
         const { data: player } = await supabase.from("players").select("id").eq("id", saved.playerId).maybeSingle();
         if (player) { setPlayerId(saved.playerId); await loadSnapshot(saved.roomId, saved.playerId); }
-        else window.localStorage.removeItem(STORAGE_KEY);
+        else { window.localStorage.removeItem(STORAGE_KEY); void loadBoards(); }
       } catch (cause) {
         setError(errorMessage(cause, "Could not restore the room."));
       } finally { setLoading(false); }
     };
     void restore();
-  }, [loadSnapshot, syncClock]);
+  }, [loadBoards, loadSnapshot, syncClock]);
 
   useEffect(() => {
     if (!supabase || !snapshot?.room.id || !playerId) return;
@@ -564,6 +845,29 @@ export function GameClient() {
       await syncClock();
       await loadSnapshot(result.room_id, result.player_id);
     } catch (cause) { setError(errorMessage(cause, "Could not enter the room.")); }
+    finally { setBusy(false); }
+  };
+
+  /**
+   * The daily runs in a room like every other round, so it reuses create_room and then
+   * starts the seeded round straight away rather than sitting in a lobby waiting for a
+   * second player to mark ready.
+   */
+  const startDaily = async (name: string) => {
+    if (!supabase) return;
+    setBusy(true); setError("");
+    try {
+      await ensureAnonymousSession();
+      const { data: created, error: createError } = await supabase.rpc("create_room", { p_display_name: name.trim() });
+      if (createError) throw createError;
+      const result = created as { room_id: string; player_id: string };
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ roomId: result.room_id, playerId: result.player_id }));
+      setPlayerId(result.player_id);
+      await syncClock();
+      const { error: startError } = await supabase.rpc("start_daily", { p_player_id: result.player_id });
+      if (startError) throw startError;
+      await loadSnapshot(result.room_id, result.player_id);
+    } catch (cause) { setError(errorMessage(cause, "Could not start the daily challenge.")); }
     finally { setBusy(false); }
   };
 
@@ -610,16 +914,28 @@ export function GameClient() {
     else await loadSnapshot(snapshotRef.current.room.id, playerId);
   }, [loadSnapshot, playerId]);
 
-  const leave = () => { window.localStorage.removeItem(STORAGE_KEY); setSnapshot(null); setPlayerId(null); setError(""); };
+  /**
+   * Rematch: the previous round's players restart immediately, with no re-ready step.
+   * p_daily is always sent explicitly alongside p_skip_ready so PostgREST resolves the
+   * four-argument signature directly instead of falling back to default arguments.
+   */
+  const rematch = () => perform("start_round", { p_game_mode: snapshot?.room.game_mode ?? "classic", p_skip_ready: true, p_daily: false });
+
+  const leave = () => {
+    window.localStorage.removeItem(STORAGE_KEY);
+    setSnapshot(null); setPlayerId(null); setError(""); setSeries({});
+    // The round that just finished belongs on the board now.
+    void loadBoards();
+  };
 
   if (loading) return <LoadingScreen />;
   if (!isSupabaseConfigured) return <SetupRequired />;
   if (missingMigrations.length > 0) return <SchemaOutdated migrations={missingMigrations} />;
   if (!snapshot || !playerId) {
     const initialCode = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("room")?.toUpperCase().slice(0, 6) ?? "" : "";
-    return <HomeScreen initialCode={initialCode} busy={busy} error={error} onCreate={(name) => enterRoom("create_room", { p_display_name: name.trim() })} onJoin={(name, code) => enterRoom("join_room", { p_display_name: name.trim(), p_code: code.trim().toUpperCase() })} />;
+    return <HomeScreen initialCode={initialCode} busy={busy} error={error} leaderboard={leaderboard} dailyBoard={dailyBoard} onCreate={(name) => enterRoom("create_room", { p_display_name: name.trim() })} onJoin={(name, code) => enterRoom("join_room", { p_display_name: name.trim(), p_code: code.trim().toUpperCase() })} onDaily={startDaily} />;
   }
-  if (snapshot.room.status === "lobby") return <LobbyScreen room={snapshot.room} players={snapshot.players} currentPlayerId={playerId} busy={busy} error={error} connected={connected} onReady={(ready) => perform("set_ready", { p_ready: ready })} onStart={(mode) => perform("start_round", { p_game_mode: mode })} onLeave={leave} />;
-  if (snapshot.room.status === "active" && snapshot.round) return <GameScreen snapshot={snapshot} currentPlayerId={playerId} clockOffset={clockOffset} connected={connected} clientStats={clientStats} setClientStats={setClientStats} onHit={hitTarget} onFinish={finishRound} />;
-  return <ResultsScreen snapshot={snapshot} currentPlayerId={playerId} connected={connected} busy={busy} error={error} clientStats={clientStats} onLobby={() => perform("return_to_lobby")} onLeave={leave} />;
+  if (snapshot.room.status === "lobby") return <LobbyScreen room={snapshot.room} players={snapshot.players} currentPlayerId={playerId} busy={busy} error={error} connected={connected} onReady={(ready) => perform("set_ready", { p_ready: ready })} onStart={(mode) => perform("start_round", { p_game_mode: mode, p_skip_ready: false, p_daily: false })} onLeave={leave} />;
+  if (snapshot.room.status === "active" && snapshot.round) return <GameScreen snapshot={snapshot} currentPlayerId={playerId} clockOffset={clockOffset} connected={connected} clientStats={clientStats} seriesWins={series} setClientStats={setClientStats} onHit={hitTarget} onFinish={finishRound} />;
+  return <ResultsScreen snapshot={snapshot} currentPlayerId={playerId} connected={connected} busy={busy} error={error} clientStats={clientStats} seriesWins={series} onLobby={() => perform("return_to_lobby")} onRematch={rematch} onLeave={leave} />;
 }
